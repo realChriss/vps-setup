@@ -318,6 +318,7 @@ gather_answers() {
     fi
 
     confirm "zoxide?" y && INSTALL_ZOXIDE=true || INSTALL_ZOXIDE=false
+    confirm "eza (takes over ls)?" y && INSTALL_EZA=true || INSTALL_EZA=false
     confirm "docker + compose?" y && INSTALL_DOCKER=true || INSTALL_DOCKER=false
     confirm "bun?" y && INSTALL_BUN=true || INSTALL_BUN=false
     confirm "btop?" y && INSTALL_BTOP=true || INSTALL_BTOP=false
@@ -329,6 +330,7 @@ gather_answers() {
     plan_row "$DO_DEBLOAT" "snap, telemetry & pro ads out"
     plan_row true "zsh + oh my zsh + plugins"
     plan_row "$INSTALL_ZOXIDE" "zoxide"
+    plan_row "$INSTALL_EZA" "eza (aliased over ls, dotfiles shown)"
     plan_row "$INSTALL_DOCKER" "docker + compose"
     plan_row "$INSTALL_BUN" "bun"
     plan_row "$INSTALL_BTOP" "btop"
@@ -604,6 +606,63 @@ install_zoxide() {
     fi
 }
 
+eza_arch() {
+    case "$(dpkg --print-architecture)" in
+        amd64) printf 'x86_64-unknown-linux-musl' ;;
+        arm64) printf 'aarch64-unknown-linux-gnu' ;;
+        armhf) printf 'arm-unknown-linux-gnueabihf' ;;
+        *)     return 1 ;;
+    esac
+}
+
+eza_upstream() {
+    local arch tmp bin rc=0
+    arch="$(eza_arch)" || return 1
+    tmp="$(mktemp -d)"
+    {
+        curl -fsSL "https://github.com/eza-community/eza/releases/latest/download/eza_${arch}.tar.gz" \
+            -o "$tmp/eza.tar.gz" \
+        && tar -xzf "$tmp/eza.tar.gz" -C "$tmp"
+    } || rc=1
+
+    if [[ $rc -eq 0 ]]; then
+        bin="$(find "$tmp" -type f -name eza -perm -u+x 2>/dev/null | head -n1)"
+        [[ -n "$bin" ]] || bin="$(find "$tmp" -type f -name eza 2>/dev/null | head -n1)"
+        if [[ -n "$bin" ]]; then
+            install -m 0755 "$bin" /usr/local/bin/eza || rc=1
+        else
+            rc=1
+        fi
+    fi
+
+    rm -rf "$tmp"
+    return "$rc"
+}
+
+eza_version() {
+    "${1:-eza}" --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
+}
+
+install_eza() {
+    if [[ "$INSTALL_EZA" != true ]]; then
+        step "eza"; skip "skipped"; return 0
+    fi
+    step "eza"
+
+    if command -v eza >/dev/null 2>&1; then
+        skip "already installed ($(eza_version))"
+        return 0
+    fi
+
+    if run "eza (static build from github)" eza_upstream; then
+        ok "eza $(eza_version /usr/local/bin/eza) in /usr/local/bin"
+    elif apt_has eza && run "eza (apt fallback)" apt_get install eza; then
+        ok "eza $(eza_version) from apt"
+    else
+        die "eza could not be installed — asked for, so stopping here"
+    fi
+}
+
 docker_repo() {
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL "https://download.docker.com/linux/${DOCKER_DISTRO}/gpg" -o /etc/apt/keyrings/docker.asc || return 1
@@ -782,6 +841,26 @@ command -v zoxide >/dev/null 2>&1 && eval "\$(zoxide init zsh)"
 EOF
     fi
 
+    if [[ "$INSTALL_EZA" == true ]]; then
+        local eza_short="--all --group-directories-first --classify=auto"
+        local eza_long="--all --long --header --group --group-directories-first --classify=auto"
+        local eza_tree="${eza_short} --tree --ignore-glob=.git"
+        cat >> "$ZSHRC" <<EOF
+
+# eza — drop-in ls, always showing hidden files (.env, .github, .gitignore…)
+# real ls and tree are still there as 'command ls', '\\ls', /bin/ls, 'command tree'
+if command -v eza >/dev/null 2>&1; then
+    alias ls='eza ${eza_short}'
+    alias l='eza ${eza_long}'
+    alias ll='eza ${eza_long}'
+    alias lsa='eza ${eza_long}'
+    alias la='eza --all ${eza_long}'
+    alias lt='eza ${eza_tree} --level=2'
+    alias tree='eza ${eza_tree}'
+fi
+EOF
+    fi
+
     # oh-my-zsh's docker plugin claims `dtop` for `docker top`; this block is
     # sourced after it, so dropping the alias here gives the binary its name back.
     if [[ "$INSTALL_DTOP" == true ]]; then
@@ -796,8 +875,11 @@ EOF
 
     local wrote="path and bun"
     [[ "$INSTALL_ZOXIDE" == true ]] && wrote="$wrote, zoxide"
+    [[ "$INSTALL_EZA" == true ]] && wrote="$wrote, eza"
     [[ "$INSTALL_DTOP" == true ]] && wrote="$wrote, dtop"
     ok "$wrote hooks written"
+    [[ "$INSTALL_EZA" == true ]] && note "ls, l, ll, la, lsa, lt and tree are eza now; \\ls gets you coreutils back"
+    return 0
 }
 
 set_default_shell() {
@@ -853,11 +935,13 @@ row() {
 }
 
 summary() {
-    local zsh_v zoxide_v docker_v bun_v btop_v dtop_v host_now shell_now
+    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v host_now shell_now
     host_now="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || true)"
     shell_now="$(getent passwd root 2>/dev/null | cut -d: -f7 || true)"
     zsh_v="$(zsh --version 2>/dev/null | awk '{print $2}' || true)"
     zoxide_v="$(zoxide --version 2>/dev/null || /root/.local/bin/zoxide --version 2>/dev/null || true)"
+    eza_v="$(eza_version)"
+    [[ -n "$eza_v" ]] || eza_v="$(eza_version /usr/local/bin/eza)"
     docker_v="$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',' || true)"
     bun_v="$(/root/.bun/bin/bun --version 2>/dev/null || true)"
     btop_v="$(btop_version)"
@@ -872,6 +956,7 @@ summary() {
     row "shell" "${shell_now:-—}"
     row "zsh" "${zsh_v:-—}"
     row "zoxide" "${zoxide_v:-—}"
+    row "eza" "${eza_v:-—}"
     row "docker" "${docker_v:-—}"
     row "bun" "${bun_v:-—}"
     row "btop" "${btop_v:-—}"
@@ -910,6 +995,7 @@ main() {
     debloat
     install_omz
     install_zoxide
+    install_eza
     install_docker
     install_bun
     install_btop
