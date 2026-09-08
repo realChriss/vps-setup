@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/realChriss/vps-setup/main/main.sh |
 
 ![zsh](https://img.shields.io/badge/zsh-Oh_My_Zsh-1A1A1A?style=flat-square&logo=gnubash&logoColor=white)
 ![zoxide](https://img.shields.io/badge/zoxide-z_%26_zi-3B6EA5?style=flat-square&logo=gnometerminal&logoColor=white)
-![eza](https://img.shields.io/badge/eza-modern_ls-2E8B57?style=flat-square&logo=gnometerminal&logoColor=white)
+![eza](https://img.shields.io/badge/eza-modern_ls-2E8B57?style=flat-square&logo=files&logoColor=white)
 <br>
 ![Docker](https://img.shields.io/badge/Docker-Engine_%2B_Compose-2496ED?style=flat-square&logo=docker&logoColor=white)
 ![Bun](https://img.shields.io/badge/Bun-JS_runtime-14151A?style=flat-square&logo=bun&logoColor=FBF0DF)
