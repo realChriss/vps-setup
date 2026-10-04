@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 readonly ZSHRC="/root/.zshrc"
+readonly ZSHENV="/root/.zshenv"
 readonly OMZ_DIR="/root/.oh-my-zsh"
 readonly OMZ_CUSTOM="${OMZ_DIR}/custom"
 readonly BLOCK_START="# >>> vps-setup >>>"
@@ -18,7 +19,7 @@ login passwd e2fsprogs initramfs-tools grub-common grub-pc grub-efi-amd64 grub2-
 iproute2 iputils-ping ca-certificates curl git zsh unzip tar landscape-common"
 
 DO_DEBLOAT=true
-NEW_HOSTNAME=""
+PROMPT_NAME=""
 NEW_KEYS=()
 SSH_KEYS_ONLY=false
 
@@ -290,18 +291,17 @@ banner() {
 gather_answers() {
     local current answer
 
-    current="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost)"
+    current="$(prompt_name_now)"
+    [[ -n "$current" ]] || current="$(real_host)"
 
     step "a few questions"
     printf '\n'
 
     while true; do
-        answer="$(ask "$(printf '    %s%s%s hostname %s[%s] %s' \
+        answer="$(ask "$(printf '    %s%s%s name in the zsh prompt %s[%s] %s' \
             "$C_PINK" "$S_TIP" "$C_RESET" "$C_DIM" "$current" "$C_RESET")" "$current")"
-        if [[ "$answer" == "$current" ]]; then
-            NEW_HOSTNAME=""; break
-        elif valid_hostname "$answer"; then
-            NEW_HOSTNAME="$answer"; break
+        if valid_hostname "$answer"; then
+            PROMPT_NAME="$answer"; break
         else
             printf '      %sletters, digits, hyphens and dots only%s\n' "$C_DIM" "$C_RESET" >&2
         fi
@@ -348,11 +348,7 @@ gather_answers() {
     plan_row "$INSTALL_F2B" "fail2ban guarding ssh"
     plan_row "$([[ ${#NEW_KEYS[@]} -gt 0 ]] && echo true || echo false)" "add ${#NEW_KEYS[@]} ssh key(s) for root"
     plan_row "$SSH_KEYS_ONLY" "ssh keys only, password login off"
-    if [[ -n "$NEW_HOSTNAME" ]]; then
-        plan_row true "hostname $C_B$NEW_HOSTNAME$C_RESET"
-    else
-        plan_row true "hostname stays $current"
-    fi
+    plan_row true "prompt says $C_B$PROMPT_NAME$C_RESET (real hostname untouched)"
     printf '\n'
 
     confirm "let's go?" y || { printf '\n    %suntouched. bye ♡%s\n\n' "$C_DIM" "$C_RESET"; exit 0; }
@@ -366,34 +362,20 @@ plan_row() {
     fi
 }
 
-set_hostname() {
-    if [[ -z "$NEW_HOSTNAME" ]]; then
-        step "hostname"; skip "left alone"; return 0
-    fi
-    step "hostname"
+real_host() { hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost; }
 
-    if have_systemd && command -v hostnamectl >/dev/null 2>&1; then
-        hostnamectl set-hostname "$NEW_HOSTNAME" >/dev/null 2>&1 \
-            || warn "hostnamectl failed; writing /etc/hostname anyway"
-    fi
-    printf '%s\n' "$NEW_HOSTNAME" > /etc/hostname
-    hostname "$NEW_HOSTNAME" 2>/dev/null || true
+prompt_name_now() {
+    sed -n "s/^HOST='\(.*\)'$/\1/p" "$ZSHENV" 2>/dev/null | tail -n1
+}
 
-    local short="${NEW_HOSTNAME%%.*}" names="$NEW_HOSTNAME"
-    [[ "$short" != "$NEW_HOSTNAME" ]] && names="$NEW_HOSTNAME $short"
-
-    if grep -qE '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
-        sed -i -E "s|^127\.0\.1\.1[[:space:]].*|127.0.1.1\t${names}|" /etc/hosts
-    else
-        printf '127.0.1.1\t%s\n' "$names" >> /etc/hosts
+set_prompt_name() {
+    step "prompt name"
+    if [[ -f "$ZSHENV" ]]; then sed -i "/^HOST='.*'$/d" "$ZSHENV"; fi
+    if [[ "$PROMPT_NAME" == "$(real_host)" ]]; then
+        skip "prompt shows the real hostname"; return 0
     fi
-    ok "now called $C_B$NEW_HOSTNAME$C_RESET"
-
-    if [[ -d /etc/cloud ]]; then
-        mkdir -p /etc/cloud/cloud.cfg.d
-        printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-preserve-hostname.cfg
-        ok "cloud-init told to keep it across reboots"
-    fi
+    printf "HOST='%s'\n" "$PROMPT_NAME" >> "$ZSHENV"
+    ok "prompt says $C_B$PROMPT_NAME$C_RESET, hostname stays $(real_host)"
 }
 
 key_count() {
@@ -1076,7 +1058,7 @@ row() {
 
 summary() {
     local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v f2b_v host_now shell_now
-    host_now="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || true)"
+    host_now="$(real_host)"
     shell_now="$(getent passwd root 2>/dev/null | cut -d: -f7 || true)"
     zsh_v="$(zsh --version 2>/dev/null | awk '{print $2}' || true)"
     zoxide_v="$(zoxide --version 2>/dev/null || /root/.local/bin/zoxide --version 2>/dev/null || true)"
@@ -1094,6 +1076,7 @@ summary() {
     printf '  %s%s%s\n\n' "$C_MINT" "$RULE" "$C_RESET"
 
     row "host" "${host_now:-—}"
+    [[ "$PROMPT_NAME" == "$host_now" ]] || row "prompt" "$PROMPT_NAME"
     row "shell" "${shell_now:-—}"
     row "zsh" "${zsh_v:-—}"
     row "zoxide" "${zoxide_v:-—}"
@@ -1137,7 +1120,7 @@ main() {
     LOG="/var/log/vps-setup-$(date +%F-%H%M%S).log"
     journal "vps-setup $(date -Is) on $DISTRO_NAME"
 
-    set_hostname
+    set_prompt_name
     setup_ssh
     update_system
     install_fail2ban
