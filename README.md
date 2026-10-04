@@ -31,6 +31,9 @@ curl -fsSL https://raw.githubusercontent.com/realChriss/vps-setup/main/main.sh |
 ![btop](https://img.shields.io/badge/btop-system_monitor-8E44AD?style=flat-square&logo=linux&logoColor=white)
 ![dtop](https://img.shields.io/badge/dtop-docker_metrics-2496ED?style=flat-square&logo=rust&logoColor=white)
 <br>
+![SSH](https://img.shields.io/badge/SSH-keys_only-4D4D4D?style=flat-square&logo=openssh&logoColor=white)
+![fail2ban](https://img.shields.io/badge/fail2ban-guards_ssh-C0392B?style=flat-square&logo=linux&logoColor=white)
+<br>
 ![Debloat](https://img.shields.io/badge/Debloat-snap,_telemetry,_ads-C0392B?style=flat-square&logo=ubuntu&logoColor=white)
 ![Fresh start](https://img.shields.io/badge/Fresh_start-upgrade-27AE60?style=flat-square&logo=linux&logoColor=white)
 

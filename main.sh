@@ -8,19 +8,19 @@ readonly OMZ_CUSTOM="${OMZ_DIR}/custom"
 readonly BLOCK_START="# >>> vps-setup >>>"
 readonly BLOCK_END="# <<< vps-setup <<<"
 readonly OMZ_PLUGINS="git docker docker-compose zsh-autosuggestions zsh-syntax-highlighting"
+readonly AUTH_KEYS="/root/.ssh/authorized_keys"
+readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/00-vps-setup.conf"
 
-# Purging Ubuntu Pro takes the ubuntu-minimal / ubuntu-server metapackages with it,
-# which makes everything they pulled in look auto-removable. These must never be
-# removed by that purge or by the autoremove at the end — losing openssh-server or
-# cloud-init on a VPS means losing the VPS.
 readonly PROTECTED_PKGS="\
 openssh-server openssh-client openssh-sftp-server sudo systemd systemd-sysv systemd-resolved \
 dbus cloud-init netplan.io ifupdown rsyslog cron apt dpkg bash coreutils util-linux mount \
 login passwd e2fsprogs initramfs-tools grub-common grub-pc grub-efi-amd64 grub2-common \
-iproute2 iputils-ping ca-certificates curl git zsh unzip tar"
+iproute2 iputils-ping ca-certificates curl git zsh unzip tar landscape-common update-notifier-common"
 
 DO_DEBLOAT=true
 NEW_HOSTNAME=""
+NEW_KEYS=()
+SSH_KEYS_ONLY=false
 
 WARNINGS=()
 LOG=""
@@ -111,8 +111,6 @@ fmt_dur() {
     if (( s < 60 )); then printf '%ds' "$s"; else printf '%dm%02ds' $((s / 60)) $((s % 60)); fi
 }
 
-# Everything noisy goes through here: output lands in the log, the shell only
-# gets a tick, a cross, and on failure the lines that actually explain it.
 run() {
     local msg="$1"; shift
     local t0=$SECONDS rc=0 out
@@ -151,7 +149,6 @@ show_why() {
     )
 }
 
-# Reads from /dev/tty so `curl … | bash` still gets answers from the keyboard.
 ask() {
     local prompt="$1" default="$2" reply=""
     if [[ -r /dev/tty ]]; then
@@ -273,7 +270,6 @@ detect_distro() {
             ;;
     esac
 
-    # Ubuntu derivatives carry UBUNTU_CODENAME; that is the one Docker's repo knows about.
     DOCKER_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
     [[ -n "$DOCKER_CODENAME" ]] || warn "no release codename found; Docker repo setup may fail"
 }
@@ -323,6 +319,20 @@ gather_answers() {
     confirm "bun?" y && INSTALL_BUN=true || INSTALL_BUN=false
     confirm "btop?" y && INSTALL_BTOP=true || INSTALL_BTOP=false
     confirm "dtop?" y && INSTALL_DTOP=true || INSTALL_DTOP=false
+    confirm "fail2ban for ssh?" y && INSTALL_F2B=true || INSTALL_F2B=false
+
+    local have
+    have="$(key_count)"
+    printf '      %sroot has %s ssh key(s) authorized%s\n' "$C_DIM" "$have" "$C_RESET" >&2
+    if confirm "add ssh public keys for root?" "$([[ $have -eq 0 ]] && echo y || echo n)"; then
+        collect_keys
+    fi
+    if (( have + ${#NEW_KEYS[@]} > 0 )); then
+        confirm "ssh keys only (turn password login off)?" y && SSH_KEYS_ONLY=true || SSH_KEYS_ONLY=false
+    else
+        SSH_KEYS_ONLY=false
+        printf '      %sno keys, so ssh password login stays on%s\n' "$C_DIM" "$C_RESET" >&2
+    fi
 
     step "the plan"
     printf '\n'
@@ -335,6 +345,9 @@ gather_answers() {
     plan_row "$INSTALL_BUN" "bun"
     plan_row "$INSTALL_BTOP" "btop"
     plan_row "$INSTALL_DTOP" "dtop"
+    plan_row "$INSTALL_F2B" "fail2ban guarding ssh"
+    plan_row "$([[ ${#NEW_KEYS[@]} -gt 0 ]] && echo true || echo false)" "add ${#NEW_KEYS[@]} ssh key(s) for root"
+    plan_row "$SSH_KEYS_ONLY" "ssh keys only, password login off"
     if [[ -n "$NEW_HOSTNAME" ]]; then
         plan_row true "hostname $C_B$NEW_HOSTNAME$C_RESET"
     else
@@ -376,11 +389,131 @@ set_hostname() {
     fi
     ok "now called $C_B$NEW_HOSTNAME$C_RESET"
 
-    # cloud-init re-applies the provider's hostname on every boot unless told not to.
     if [[ -d /etc/cloud ]]; then
         mkdir -p /etc/cloud/cloud.cfg.d
         printf 'preserve_hostname: true\n' > /etc/cloud/cloud.cfg.d/99-preserve-hostname.cfg
         ok "cloud-init told to keep it across reboots"
+    fi
+}
+
+key_count() {
+    { ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null || true; } | wc -l
+}
+
+collect_keys() {
+    local line fp
+    printf '      %spaste one public key per line, empty line when done%s\n' "$C_DIM" "$C_RESET" >&2
+    while true; do
+        line="$(ask "$(printf '      %s%s%s ' "$C_PINK" "$S_TIP" "$C_RESET")" "")"
+        line="${line//$'\r'/}"
+        [[ -n "${line// /}" ]] || break
+        if fp="$(ssh-keygen -l -f - <<< "$line" 2>/dev/null)"; then
+            NEW_KEYS+=("$line")
+            printf '        %s%s%s %s\n' "$C_MINT" "$S_OK" "$C_RESET" "$fp" >&2
+        else
+            printf '        %snot a public key — want: ssh-ed25519 AAAA… comment%s\n' "$C_DIM" "$C_RESET" >&2
+        fi
+    done
+}
+
+add_keys() {
+    local k fp have added=0
+    if [[ ${#NEW_KEYS[@]} -eq 0 ]]; then
+        skip "no new keys ($(key_count) authorized)"; return 0
+    fi
+    install -d -m 700 /root/.ssh
+    touch "$AUTH_KEYS"
+    chmod 600 "$AUTH_KEYS"
+    if [[ -s "$AUTH_KEYS" && -n "$(tail -c1 "$AUTH_KEYS")" ]]; then printf '\n' >> "$AUTH_KEYS"; fi
+
+    have="$({ ssh-keygen -l -f "$AUTH_KEYS" 2>/dev/null || true; } | awk '{print $2}')"
+    for k in "${NEW_KEYS[@]}"; do
+        fp="$(ssh-keygen -l -f - <<< "$k" | awk '{print $2}')"
+        if grep -qxF "$fp" <<< "$have"; then continue; fi
+        printf '%s\n' "$k" >> "$AUTH_KEYS"
+        have+=$'\n'"$fp"
+        added=$((added + 1))
+    done
+    ok "$added key(s) added, $(key_count) authorized for root"
+}
+
+harden_sshd() {
+    local cfg=/etc/ssh/sshd_config eff
+    if ! command -v sshd >/dev/null 2>&1; then
+        warn "sshd not found — ssh config untouched"; return 0
+    fi
+    grep -qiE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' "$cfg" \
+        || sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' "$cfg"
+    mkdir -p /etc/ssh/sshd_config.d /run/sshd
+
+    {
+        printf '# written by vps-setup — a re-run rewrites this file\n'
+        printf 'X11Forwarding no\nLoginGraceTime 30\n'
+        if [[ "$SSH_KEYS_ONLY" == true ]]; then
+            printf 'PubkeyAuthentication yes\nPasswordAuthentication no\n'
+            printf 'KbdInteractiveAuthentication no\nPermitRootLogin prohibit-password\n'
+        fi
+    } > "$SSHD_DROPIN"
+
+    if ! sshd -t >/dev/null 2>&1; then
+        rm -f "$SSHD_DROPIN"
+        warn "sshd rejected the new config, ssh left as it was: $(sshd -t 2>&1 | head -n1)"
+        return 0
+    fi
+    if have_systemd; then
+        systemctl reload ssh.service >/dev/null 2>&1 || systemctl reload sshd.service >/dev/null 2>&1 || true
+    fi
+    ok "x11 forwarding off, 30s to finish logging in"
+
+    [[ "$SSH_KEYS_ONLY" == true ]] || return 0
+    eff="$(sshd -T 2>/dev/null || true)"
+    if grep -qx 'passwordauthentication no' <<< "$eff"; then
+        ok "password login off, keys only"
+        note "keep this session open and test a fresh ssh login before closing it"
+    else
+        warn "something still turns passwords on — check: sshd -T | grep -i password"
+    fi
+}
+
+setup_ssh() {
+    step "ssh"
+    add_keys
+    harden_sshd
+}
+
+install_fail2ban() {
+    if [[ "$INSTALL_F2B" != true ]]; then
+        step "fail2ban"; skip "skipped"; return 0
+    fi
+    step "fail2ban"
+
+    run "fail2ban" apt_get install fail2ban python3-systemd \
+        || { warn "fail2ban could not be installed"; return 0; }
+
+    cat > /etc/fail2ban/jail.d/vps-setup.local <<'EOF'
+# written by vps-setup
+[DEFAULT]
+bantime = 1h
+bantime.increment = true
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+backend = systemd
+EOF
+
+    sysd enable fail2ban.service
+    sysd restart fail2ban.service
+    local i up=false
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+        if fail2ban-client status sshd >/dev/null 2>&1; then up=true; break; fi
+        sleep 1
+    done
+    if [[ "$up" == true ]]; then
+        ok "watching ssh: 5 misses in 10m = 1h ban, doubling for repeat offenders"
+    else
+        warn "fail2ban is not watching ssh — check: systemctl status fail2ban"
     fi
 }
 
@@ -394,12 +527,11 @@ update_system() {
         || die "could not install the base packages"
 }
 
-# Marks the core set manual so removing the Ubuntu metapackages later cannot make
-# it look like an unused dependency.
 protect_core_packages() {
     local keep=(
         openssh-server openssh-client openssh-sftp-server sudo cloud-init netplan.io ifupdown
         systemd systemd-sysv systemd-resolved dbus rsyslog cron ufw unattended-upgrades
+        landscape-common update-notifier-common
         ca-certificates curl wget gnupg git zsh unzip tar less nano vim-tiny
         iproute2 iputils-ping net-tools initramfs-tools e2fsprogs
         linux-generic linux-image-generic linux-image-virtual linux-virtual
@@ -421,7 +553,6 @@ snap_purge_all() {
     for pass in 1 2 3; do
         mapfile -t snaps < <(snap list 2>/dev/null | awk 'NR>1 {print $1}' || true)
         [[ ${#snaps[@]} -gt 0 ]] || break
-        # apps first, then bases/core/snapd — snapd refuses to drop a base still in use
         for name in "${snaps[@]}"; do
             case "$name" in core*|snapd|bare) continue ;; esac
             timeout 180 snap remove --purge "$name" || true
@@ -448,7 +579,6 @@ remove_snap() {
     purge_if_installed snapd
     apt-mark hold snapd >/dev/null 2>&1 || true
 
-    # Negative pin so nothing can pull snapd back in as a dependency.
     cat > /etc/apt/preferences.d/no-snap.pref <<'EOF'
 Package: snapd
 Pin: release a=*
@@ -467,12 +597,12 @@ remove_telemetry() {
     fi
     sysd disable --now apport.service
     sysd disable --now whoopsie.service
-    purge_if_installed landscape-common landscape-client
-    ok "crash reporting, popcon and landscape gone"
+    purge_if_installed landscape-client
+    ok "crash reporting, popcon and landscape client gone"
 }
 
-remove_motd_ads() {
-    local f
+tune_motd() {
+    local f p want=()
     if [[ -f /etc/default/motd-news ]]; then
         sed -i 's/^ENABLED=.*/ENABLED=0/' /etc/default/motd-news
     fi
@@ -480,12 +610,25 @@ remove_motd_ads() {
     sysd disable --now motd-news.service
 
     for f in 10-help-text 50-motd-news 80-livepatch 88-esm-announce \
-             91-contract-ua-esm-status 91-release-upgrade 95-hwe-eol; do
+             91-contract-ua-esm-status 95-hwe-eol; do
         if [[ -f "/etc/update-motd.d/$f" ]]; then
             chmod -x "/etc/update-motd.d/$f" || true
         fi
     done
-    ok "motd news, livepatch and upgrade nags silenced"
+
+    for p in landscape-common update-notifier-common; do
+        if ! pkg_installed "$p" && apt_has "$p"; then want+=("$p"); fi
+    done
+    if [[ ${#want[@]} -gt 0 ]]; then
+        run "motd system info + update counter" apt_get install "${want[@]}" \
+            || warn "could not install ${want[*]} — motd stays bare"
+    fi
+    for f in 50-landscape-sysinfo 90-updates-available 91-release-upgrade 98-reboot-required; do
+        if [[ -f "/etc/update-motd.d/$f" ]]; then
+            chmod +x "/etc/update-motd.d/$f" || true
+        fi
+    done
+    ok "motd ads silenced; load, disk, memory and pending updates still shown"
 }
 
 remove_ubuntu_pro() {
@@ -504,8 +647,6 @@ remove_ubuntu_pro() {
         pro config set apt_news=false >/dev/null 2>&1 || true
     fi
 
-    # Dry run first — this purge drops ubuntu-minimal/ubuntu-server, so make very
-    # sure it is not about to take sshd or the kernel with it.
     removals="$(would_remove purge "${present[@]}")"
     bad="$(protected_hits "$removals")"
     if [[ -n "$bad" ]]; then
@@ -530,7 +671,7 @@ debloat() {
     protect_core_packages
     remove_snap
     remove_telemetry
-    remove_motd_ads
+    tune_motd
     remove_ubuntu_pro
 }
 
@@ -568,7 +709,6 @@ install_omz() {
         fi
     done
 
-    # zsh-syntax-highlighting must stay last — it wraps the ZLE widgets the others register.
     if grep -qE '^[[:space:]]*plugins=\(' "$ZSHRC"; then
         sed -i -E "s|^[[:space:]]*plugins=\(.*\)[[:space:]]*$|plugins=($OMZ_PLUGINS)|" "$ZSHRC"
     else
@@ -596,7 +736,6 @@ install_zoxide() {
         return 0
     fi
 
-    # The upstream installer keeps us on a modern release; distro packages lag badly.
     if run "zoxide (upstream installer)" zoxide_upstream; then
         ok "$(/root/.local/bin/zoxide --version 2>/dev/null || echo zoxide) in ~/.local/bin"
     elif run "zoxide (apt fallback)" apt_get install zoxide; then
@@ -735,8 +874,6 @@ btop_arch() {
     esac
 }
 
-# Escape hatch for releases that do not ship btop at all (Debian 11 has it in
-# backports only): the upstream static musl build needs nothing from the system.
 btop_upstream() {
     local arch tmp rc=0
     arch="$(btop_arch)" || return 1
@@ -761,8 +898,6 @@ apt_has() {
     [[ -n "$cand" && "$cand" != "(none)" ]]
 }
 
-# Tools that colour their --version output leave a reset sequence inside our line,
-# which cancels the dim styling for everything printed after it.
 strip_ansi() { sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g; s/[[:cntrl:]]//g'; }
 
 btop_version() {
@@ -789,8 +924,6 @@ install_btop() {
     fi
 }
 
-# DTOP_NO_MODIFY_PATH keeps the installer out of .zshrc — ~/.local/bin is already
-# on PATH from the block this script writes.
 dtop_install() {
     as_root_home env DTOP_NO_MODIFY_PATH=1 sh -c \
         "curl --proto '=https' --tlsv1.2 -LsSf https://github.com/amir20/dtop/releases/latest/download/dtop-installer.sh | sh" \
@@ -820,7 +953,6 @@ install_dtop() {
 write_zshrc_block() {
     step "wiring up .zshrc"
 
-    # Drop the previous block first so re-runs never stack duplicates.
     sed -i "\|^${BLOCK_START}$|,\|^${BLOCK_END}$|d" "$ZSHRC"
 
     cat >> "$ZSHRC" <<EOF
@@ -861,8 +993,6 @@ fi
 EOF
     fi
 
-    # oh-my-zsh's docker plugin claims `dtop` for `docker top`; this block is
-    # sourced after it, so dropping the alias here gives the binary its name back.
     if [[ "$INSTALL_DTOP" == true ]]; then
         cat >> "$ZSHRC" <<'EOF'
 
@@ -935,7 +1065,7 @@ row() {
 }
 
 summary() {
-    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v host_now shell_now
+    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v f2b_v host_now shell_now
     host_now="$(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || true)"
     shell_now="$(getent passwd root 2>/dev/null | cut -d: -f7 || true)"
     zsh_v="$(zsh --version 2>/dev/null | awk '{print $2}' || true)"
@@ -946,6 +1076,7 @@ summary() {
     bun_v="$(/root/.bun/bin/bun --version 2>/dev/null || true)"
     btop_v="$(btop_version)"
     [[ -n "$btop_v" ]] || btop_v="$(btop_version /usr/local/bin/btop)"
+    f2b_v="$(fail2ban-client version 2>/dev/null | head -n1 || true)"
     dtop_v="$({ dtop --version 2>/dev/null || /root/.local/bin/dtop --version 2>/dev/null; } | awk 'NR==1 {print $NF; exit}' | strip_ansi || true)"
 
     printf '\n  %s%s%s\n' "$C_MINT" "$RULE" "$C_RESET"
@@ -961,6 +1092,12 @@ summary() {
     row "bun" "${bun_v:-—}"
     row "btop" "${btop_v:-—}"
     row "dtop" "${dtop_v:-—}"
+    row "fail2ban" "${f2b_v:-—}"
+    if [[ "$SSH_KEYS_ONLY" == true ]]; then
+        row "ssh" "keys only, $(key_count) authorized"
+    else
+        row "ssh" "passwords allowed, $(key_count) key(s)"
+    fi
 
     if [[ ${#WARNINGS[@]} -gt 0 ]]; then
         local w
@@ -991,7 +1128,9 @@ main() {
     journal "vps-setup $(date -Is) on $DISTRO_NAME"
 
     set_hostname
+    setup_ssh
     update_system
+    install_fail2ban
     debloat
     install_omz
     install_zoxide
