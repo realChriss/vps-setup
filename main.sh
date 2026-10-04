@@ -348,7 +348,7 @@ gather_answers() {
     plan_row "$INSTALL_F2B" "fail2ban guarding ssh"
     plan_row "$([[ ${#NEW_KEYS[@]} -gt 0 ]] && echo true || echo false)" "add ${#NEW_KEYS[@]} ssh key(s) for root"
     plan_row "$SSH_KEYS_ONLY" "ssh keys only, password login off"
-    plan_row true "prompt says $C_B$PROMPT_NAME$C_RESET (real hostname untouched)"
+    plan_row true "prompt name $C_B$PROMPT_NAME$C_RESET"
     printf '\n'
 
     confirm "let's go?" y || { printf '\n    %suntouched. bye ♡%s\n\n' "$C_DIM" "$C_RESET"; exit 0; }
@@ -372,11 +372,10 @@ prompt_name_now() {
 set_prompt_name() {
     step "prompt name"
     if [[ -f "$ZSHENV" ]]; then sed -i "/^HOST='.*'$/d" "$ZSHENV"; fi
-    if [[ "$PROMPT_NAME" == "$(real_host)" ]]; then
-        skip "prompt shows the real hostname"; return 0
+    if [[ "$PROMPT_NAME" != "$(real_host)" ]]; then
+        printf "HOST='%s'\n" "$PROMPT_NAME" >> "$ZSHENV"
     fi
-    printf "HOST='%s'\n" "$PROMPT_NAME" >> "$ZSHENV"
-    ok "prompt says $C_B$PROMPT_NAME$C_RESET, hostname stays $(real_host)"
+    ok "prompt name $C_B$PROMPT_NAME$C_RESET"
 }
 
 key_count() {
@@ -1058,8 +1057,7 @@ row() {
 }
 
 summary() {
-    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v f2b_v host_now shell_now
-    host_now="$(real_host)"
+    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v f2b_v shell_now
     shell_now="$(getent passwd root 2>/dev/null | cut -d: -f7 || true)"
     zsh_v="$(zsh --version 2>/dev/null | awk '{print $2}' || true)"
     zoxide_v="$(zoxide --version 2>/dev/null || /root/.local/bin/zoxide --version 2>/dev/null || true)"
@@ -1076,8 +1074,7 @@ summary() {
     printf '  %s%s  all done%s\n' "$C_MINT" "$S_STAR" "$C_RESET"
     printf '  %s%s%s\n\n' "$C_MINT" "$RULE" "$C_RESET"
 
-    row "host" "${host_now:-—}"
-    [[ "$PROMPT_NAME" == "$host_now" ]] || row "prompt" "$PROMPT_NAME"
+    row "prompt" "$PROMPT_NAME"
     row "shell" "${shell_now:-—}"
     row "zsh" "${zsh_v:-—}"
     row "zoxide" "${zoxide_v:-—}"
