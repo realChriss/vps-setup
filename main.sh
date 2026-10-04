@@ -15,7 +15,7 @@ readonly PROTECTED_PKGS="\
 openssh-server openssh-client openssh-sftp-server sudo systemd systemd-sysv systemd-resolved \
 dbus cloud-init netplan.io ifupdown rsyslog cron apt dpkg bash coreutils util-linux mount \
 login passwd e2fsprogs initramfs-tools grub-common grub-pc grub-efi-amd64 grub2-common \
-iproute2 iputils-ping ca-certificates curl git zsh unzip tar landscape-common update-notifier-common"
+iproute2 iputils-ping ca-certificates curl git zsh unzip tar landscape-common"
 
 DO_DEBLOAT=true
 NEW_HOSTNAME=""
@@ -205,7 +205,7 @@ pkg_installed() {
 }
 
 would_remove() {
-    DEBIAN_FRONTEND=noninteractive apt-get -s "$@" 2>/dev/null | awk '/^Remv /{print $2}' || true
+    DEBIAN_FRONTEND=noninteractive apt-get -s "$@" 2>/dev/null | awk '/^(Remv|Purg) /{print $2}' || true
 }
 
 protected_hits() {
@@ -531,7 +531,7 @@ protect_core_packages() {
     local keep=(
         openssh-server openssh-client openssh-sftp-server sudo cloud-init netplan.io ifupdown
         systemd systemd-sysv systemd-resolved dbus rsyslog cron ufw unattended-upgrades
-        landscape-common update-notifier-common
+        landscape-common ubuntu-release-upgrader-core
         ca-certificates curl wget gnupg git zsh unzip tar less nano vim-tiny
         iproute2 iputils-ping net-tools initramfs-tools e2fsprogs
         linux-generic linux-image-generic linux-image-virtual linux-virtual
@@ -602,33 +602,43 @@ remove_telemetry() {
 }
 
 tune_motd() {
-    local f p want=()
+    local f
     if [[ -f /etc/default/motd-news ]]; then
         sed -i 's/^ENABLED=.*/ENABLED=0/' /etc/default/motd-news
     fi
     sysd disable --now motd-news.timer
     sysd disable --now motd-news.service
 
-    for f in 10-help-text 50-motd-news 80-livepatch 88-esm-announce \
-             91-contract-ua-esm-status 95-hwe-eol; do
+    for f in 10-help-text 50-motd-news 80-livepatch 88-esm-announce 90-updates-available \
+             91-contract-ua-esm-status 95-hwe-eol 98-reboot-required; do
         if [[ -f "/etc/update-motd.d/$f" ]]; then
             chmod -x "/etc/update-motd.d/$f" || true
         fi
     done
 
-    for p in landscape-common update-notifier-common; do
-        if ! pkg_installed "$p" && apt_has "$p"; then want+=("$p"); fi
-    done
-    if [[ ${#want[@]} -gt 0 ]]; then
-        run "motd system info + update counter" apt_get install "${want[@]}" \
-            || warn "could not install ${want[*]} — motd stays bare"
+    if ! pkg_installed landscape-common && apt_has landscape-common; then
+        run "motd system info" apt_get install landscape-common \
+            || warn "could not install landscape-common — no load/disk/memory in motd"
     fi
-    for f in 50-landscape-sysinfo 90-updates-available 91-release-upgrade 98-reboot-required; do
+    for f in 50-landscape-sysinfo 91-release-upgrade; do
         if [[ -f "/etc/update-motd.d/$f" ]]; then
             chmod +x "/etc/update-motd.d/$f" || true
         fi
     done
-    ok "motd ads silenced; load, disk, memory and pending updates still shown"
+
+    cat > /etc/update-motd.d/90-vps-updates <<'EOF'
+#!/bin/sh
+c=/var/cache/vps-updates-count
+if [ ! -s $c ] || [ /var/lib/dpkg/status -nt $c ] || [ /var/lib/apt/lists -nt $c ]; then
+    apt-get -s -o Debug::NoLocking=1 dist-upgrade 2>/dev/null | grep -c '^Inst ' > $c
+fi
+n=$(cat $c)
+[ "$n" -gt 0 ] && printf '\n%s update(s) can be applied: apt upgrade\n' "$n"
+[ -f /var/run/reboot-required ] && printf '\n*** System restart required ***\n'
+exit 0
+EOF
+    chmod +x /etc/update-motd.d/90-vps-updates
+    ok "motd ads silenced; load, disk, memory, pending updates and reboot notice shown"
 }
 
 remove_ubuntu_pro() {
