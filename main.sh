@@ -365,6 +365,7 @@ plan_row() {
 real_host() { hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo localhost; }
 
 prompt_name_now() {
+    [[ -f "$ZSHENV" ]] || return 0
     sed -n "s/^HOST='\(.*\)'$/\1/p" "$ZSHENV" 2>/dev/null | tail -n1
 }
 
