@@ -301,7 +301,7 @@ gather_answers() {
     printf '\n'
 
     while true; do
-        answer="$(ask "$(printf '    %s%s%s name in the zsh prompt %s[%s] %s' \
+        answer="$(ask "$(printf '    %s%s%s server name %s[%s] %s' \
             "$C_PINK" "$S_TIP" "$C_RESET" "$C_DIM" "$current" "$C_RESET")" "$current")"
         if valid_hostname "$answer"; then
             PROMPT_NAME="$answer"; break
@@ -354,7 +354,7 @@ gather_answers() {
     plan_row "$INSTALL_F2B" "fail2ban guarding ssh"
     plan_row "$([[ ${#NEW_KEYS[@]} -gt 0 ]] && echo true || echo false)" "add ${#NEW_KEYS[@]} ssh key(s) for root"
     plan_row "$SSH_KEYS_ONLY" "ssh keys only, password login off"
-    plan_row true "prompt name $C_B$PROMPT_NAME$C_RESET"
+    plan_row true "server name $C_B$PROMPT_NAME$C_RESET (prompt + login screen)"
     printf '\n'
 
     confirm "let's go?" y || { printf '\n    %suntouched. bye ♡%s\n\n' "$C_DIM" "$C_RESET"; exit 0; }
@@ -376,12 +376,12 @@ prompt_name_now() {
 }
 
 set_prompt_name() {
-    step "prompt name"
+    step "server name"
     if [[ -f "$ZSHENV" ]]; then sed -i "/^HOST='.*'$/d" "$ZSHENV"; fi
     if [[ "$PROMPT_NAME" != "$(real_host)" ]]; then
         printf "HOST='%s'\n" "$PROMPT_NAME" >> "$ZSHENV"
     fi
-    ok "prompt name $C_B$PROMPT_NAME$C_RESET"
+    ok "server name $C_B$PROMPT_NAME$C_RESET in the prompt and login screen"
 }
 
 key_count() {
@@ -1197,7 +1197,7 @@ summary() {
     printf '  %s%s  all done%s\n' "$C_MINT" "$S_STAR" "$C_RESET"
     printf '  %s%s%s\n\n' "$C_MINT" "$RULE" "$C_RESET"
 
-    row "prompt" "$PROMPT_NAME"
+    row "name" "$PROMPT_NAME"
     row "shell" "${shell_now:-—}"
     row "zsh" "${zsh_v:-—}"
     row "zoxide" "${zoxide_v:-—}"
