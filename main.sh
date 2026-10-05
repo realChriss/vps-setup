@@ -16,7 +16,7 @@ readonly PROTECTED_PKGS="\
 openssh-server openssh-client openssh-sftp-server sudo systemd systemd-sysv systemd-resolved \
 dbus cloud-init netplan.io ifupdown rsyslog cron apt dpkg bash coreutils util-linux mount \
 login passwd e2fsprogs initramfs-tools grub-common grub-pc grub-efi-amd64 grub2-common \
-iproute2 iputils-ping ca-certificates curl git zsh unzip tar landscape-common"
+iproute2 iputils-ping ca-certificates curl git zsh unzip tar"
 
 DO_DEBLOAT=true
 PROMPT_NAME=""
@@ -513,7 +513,7 @@ protect_core_packages() {
     local keep=(
         openssh-server openssh-client openssh-sftp-server sudo cloud-init netplan.io ifupdown
         systemd systemd-sysv systemd-resolved dbus rsyslog cron ufw unattended-upgrades
-        landscape-common ubuntu-release-upgrader-core
+        ubuntu-release-upgrader-core
         ca-certificates curl wget gnupg git zsh unzip tar less nano vim-tiny
         iproute2 iputils-ping net-tools initramfs-tools e2fsprogs
         linux-generic linux-image-generic linux-image-virtual linux-virtual
@@ -591,22 +591,16 @@ tune_motd() {
     sysd disable --now motd-news.timer
     sysd disable --now motd-news.service
 
-    for f in 10-help-text 50-motd-news 80-livepatch 88-esm-announce 90-updates-available \
-             91-contract-ua-esm-status 95-hwe-eol 98-reboot-required; do
+    for f in 10-help-text 50-landscape-sysinfo 50-motd-news 80-livepatch 88-esm-announce \
+             90-updates-available 91-contract-ua-esm-status 95-hwe-eol 98-reboot-required; do
         if [[ -f "/etc/update-motd.d/$f" ]]; then
             chmod -x "/etc/update-motd.d/$f" || true
         fi
     done
 
-    if ! pkg_installed landscape-common && apt_has landscape-common; then
-        run "motd system info" apt_get install landscape-common \
-            || warn "could not install landscape-common — no load/disk/memory in motd"
+    if [[ -f /etc/update-motd.d/91-release-upgrade ]]; then
+        chmod +x /etc/update-motd.d/91-release-upgrade || true
     fi
-    for f in 50-landscape-sysinfo 91-release-upgrade; do
-        if [[ -f "/etc/update-motd.d/$f" ]]; then
-            chmod +x "/etc/update-motd.d/$f" || true
-        fi
-    done
 
     cat > /etc/update-motd.d/90-vps-updates <<'EOF'
 #!/bin/sh
@@ -620,7 +614,7 @@ n=$(cat $c)
 exit 0
 EOF
     chmod +x /etc/update-motd.d/90-vps-updates
-    ok "motd ads silenced; load, disk, memory, pending updates and reboot notice shown"
+    ok "motd ads and slow sysinfo off; pending updates and reboot notice shown"
 }
 
 remove_ubuntu_pro() {
