@@ -12,6 +12,8 @@ readonly OMZ_PLUGINS="git docker docker-compose zsh-autosuggestions zsh-syntax-h
 readonly AUTH_KEYS="/root/.ssh/authorized_keys"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/00-vps-setup.conf"
 readonly SYSCTL_DROPIN="/etc/sysctl.d/99-vps-setup.conf"
+readonly JOURNALD_DROPIN="/etc/systemd/journald.conf.d/00-vps-setup.conf"
+readonly SWAPFILE="/swapfile"
 
 readonly PROTECTED_PKGS="\
 openssh-server openssh-client openssh-sftp-server sudo systemd systemd-sysv systemd-resolved \
@@ -338,7 +340,9 @@ gather_answers() {
     step "the plan"
     printf '\n'
     plan_row true "full system upgrade"
-    plan_row true "kernel tweaks (ping, udp buffers, overcommit)"
+    plan_row true "kernel tweaks (ping, udp buffers, overcommit, swappiness)"
+    plan_row true "2 GB swap file (unless swap exists)"
+    plan_row true "journal capped at 200 MB"
     plan_row "$DO_DEBLOAT" "snap, telemetry & pro ads out"
     plan_row true "zsh + oh my zsh + plugins"
     plan_row "$INSTALL_ZOXIDE" "zoxide"
@@ -473,15 +477,56 @@ net.ipv4.ping_group_range = 1 65535
 net.core.rmem_max = 8388608
 net.core.wmem_max = 8388608
 vm.overcommit_memory = 1
+vm.swappiness = 10
 EOF
 
     local failed
     failed="$(sysctl -p "$SYSCTL_DROPIN" 2>&1 >/dev/null || true)"
     if [[ -z "$failed" ]]; then
-        ok "unprivileged ping, 8 MB socket buffers, memory overcommit on"
+        ok "unprivileged ping, 8 MB socket buffers, overcommit on, swappiness 10"
     else
         warn "some kernel settings were refused: $(head -n1 <<< "$failed")"
     fi
+}
+
+setup_swap() {
+    step "swap"
+    if [[ -n "$(swapon --show --noheadings 2>/dev/null || true)" ]]; then
+        skip "swap already active ($(free -h | awk '/^Swap:/ {print $2}'))"
+        return 0
+    fi
+
+    local avail_kb
+    avail_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
+    if (( avail_kb < 4 * 1024 * 1024 )); then
+        warn "less than 4 GB free on / — no swap file created"
+        return 0
+    fi
+
+    if ! { fallocate -l 2G "$SWAPFILE" 2>/dev/null || dd if=/dev/zero of="$SWAPFILE" bs=1M count=2048 status=none; } \
+        || ! chmod 600 "$SWAPFILE" \
+        || ! mkswap "$SWAPFILE" >/dev/null 2>&1 \
+        || ! swapon "$SWAPFILE" 2>/dev/null; then
+        swapoff "$SWAPFILE" 2>/dev/null || true
+        rm -f "$SWAPFILE"
+        warn "could not create a swap file — this vps type may not allow swap"
+        return 0
+    fi
+
+    grep -qE "^${SWAPFILE}[[:space:]]" /etc/fstab || printf '%s none swap sw 0 0\n' "$SWAPFILE" >> /etc/fstab
+    ok "2 GB swap at $SWAPFILE, only used under memory pressure"
+}
+
+tune_journald() {
+    step "journal"
+    mkdir -p "${JOURNALD_DROPIN%/*}"
+    cat > "$JOURNALD_DROPIN" <<'EOF'
+# written by vps-setup — a re-run rewrites this file
+[Journal]
+SystemMaxUse=200M
+EOF
+    sysd restart systemd-journald.service
+    ok "journal capped at 200 MB"
 }
 
 install_fail2ban() {
@@ -1137,6 +1182,8 @@ main() {
     setup_ssh
     update_system
     tune_sysctl
+    setup_swap
+    tune_journald
     install_fail2ban
     debloat
     install_omz
