@@ -677,18 +677,14 @@ name=$(sed -n "s/^HOST='\(.*\)'$/\1/p" /root/.zshenv 2>/dev/null | tail -n1)
 [ -n "$name" ] || name=$(hostname)
 . /etc/os-release
 
-read -r _ u1 n1 s1 i1 w1 q1 sq1 st1 _ < /proc/stat
-sleep 0.2
-read -r _ u2 n2 s2 i2 w2 q2 sq2 st2 _ < /proc/stat
-busy=$(( (u2 + n2 + s2 + q2 + sq2) - (u1 + n1 + s1 + q1 + sq1) ))
-total=$(( busy + (i2 + w2 + st2) - (i1 + w1 + st1) ))
+read -r load _ < /proc/loadavg
 read -r up _ < /proc/uptime
 up=${up%.*}
 disk=$(df -Pk / | awk 'NR == 2 { print $3, $3 + $4 }')
 ip=$(hostname -I 2>/dev/null | cut -d' ' -f1)
 
 awk -v name="$name" -v os="$PRETTY_NAME" \
-    -v busy="$busy" -v total="$total" -v cpus="$(getconf _NPROCESSORS_ONLN)" \
+    -v loadavg="$load" -v cpus="$(getconf _NPROCESSORS_ONLN)" \
     -v up="$up" -v disk="$disk" -v ip="$ip" '
 function rep(s, n,   o) { o = ""; while (n-- > 0) o = o s; return o }
 function h(k) { return k >= 1048576 ? sprintf("%.1fG", k / 1048576) : sprintf("%dM", k / 1024) }
@@ -720,7 +716,7 @@ END {
     printf "  %s│%s     %s%s · up %s%s%s%s│%s\n", PINK, R, DIM, os, upt, R, rep(" ", w - il - 5), PINK, R
     printf "  %s╰%s╯%s\n", PINK, rep("─", w), R
 
-    meter("cpu", total > 0 ? busy * 100 / total : 0, cpus " cores")
+    meter("cpu", cpus > 0 ? loadavg * 100 / cpus : 0, cpus " cores")
     usage("memory", mt - ma, mt)
     split(disk, dk, " "); usage("disk", dk[1], dk[2])
     if (st > 0) usage("swap", st - sf, st)
