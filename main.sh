@@ -503,12 +503,15 @@ setup_swap() {
         return 0
     fi
 
+    local existed=false
+    [[ -e "$SWAPFILE" ]] && existed=true
+
     if ! { fallocate -l 2G "$SWAPFILE" 2>/dev/null || dd if=/dev/zero of="$SWAPFILE" bs=1M count=2048 status=none; } \
         || ! chmod 600 "$SWAPFILE" \
         || ! mkswap "$SWAPFILE" >/dev/null 2>&1 \
         || ! swapon "$SWAPFILE" 2>/dev/null; then
         swapoff "$SWAPFILE" 2>/dev/null || true
-        rm -f "$SWAPFILE"
+        [[ "$existed" == true ]] || rm -f "$SWAPFILE"
         warn "could not create a swap file — this vps type may not allow swap"
         return 0
     fi
@@ -657,7 +660,7 @@ tune_motd() {
     sysd disable --now motd-news.timer
     sysd disable --now motd-news.service
 
-    for f in 10-help-text 50-landscape-sysinfo 50-motd-news 80-livepatch 88-esm-announce \
+    for f in 00-header 10-help-text 50-landscape-sysinfo 50-motd-news 80-livepatch 88-esm-announce \
              90-updates-available 91-contract-ua-esm-status 95-hwe-eol 98-reboot-required; do
         if [[ -f "/etc/update-motd.d/$f" ]]; then
             chmod -x "/etc/update-motd.d/$f" || true
@@ -667,6 +670,66 @@ tune_motd() {
     if [[ -f /etc/update-motd.d/91-release-upgrade ]]; then
         chmod +x /etc/update-motd.d/91-release-upgrade || true
     fi
+
+    cat > /etc/update-motd.d/00-vps-welcome <<'EOF'
+#!/bin/sh
+name=$(sed -n "s/^HOST='\(.*\)'$/\1/p" /root/.zshenv 2>/dev/null | tail -n1)
+[ -n "$name" ] || name=$(hostname)
+. /etc/os-release
+
+read -r l1 l5 l15 _ < /proc/loadavg
+read -r up _ < /proc/uptime
+up=${up%.*}
+disk=$(df -Pk / | awk 'NR == 2 { print $3, $3 + $4 }')
+ip=$(hostname -I 2>/dev/null | cut -d' ' -f1)
+docker=$(find /sys/fs/cgroup/system.slice -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l)
+
+awk -v name="$name" -v os="$PRETTY_NAME" \
+    -v l1="$l1" -v l5="$l5" -v l15="$l15" -v cpus="$(getconf _NPROCESSORS_ONLN)" \
+    -v up="$up" -v disk="$disk" -v ip="$ip" -v docker="$docker" '
+function rep(s, n,   o) { o = ""; while (n-- > 0) o = o s; return o }
+function h(k) { return k >= 1048576 ? sprintf("%.1fG", k / 1048576) : sprintf("%dM", k / 1024) }
+function tone(pct) { return pct >= 85 ? ROSE : pct >= 60 ? PEACH : MINT }
+function row(label, value) { printf "    %s%-7s%s %s\n", GREY, label, R, value }
+function usage(label, used, total,   pct, n) {
+    pct = total > 0 ? used * 100 / total : 0
+    n = int(pct * 16 / 100 + 0.5); if (n > 16) n = 16
+    row(label, tone(pct) rep("━", n) R DIM rep("━", 16 - n) R "  " tone(pct) sprintf("%3d%%", pct) R "  " DIM h(used) " / " h(total) R)
+}
+/^MemTotal:/     { mt = $2 }
+/^MemAvailable:/ { ma = $2 }
+/^SwapTotal:/    { st = $2 }
+/^SwapFree:/     { sf = $2 }
+END {
+    E = sprintf("%c", 27); R = E "[0m"; B = E "[1m"; DIM = E "[2m"
+    PINK = E "[38;5;211m"; MAUVE = E "[38;5;141m"; GREY = E "[38;5;245m"
+    MINT = E "[38;5;114m"; PEACH = E "[38;5;216m"; ROSE = E "[38;5;210m"
+
+    d = int(up / 86400); hr = int(up % 86400 / 3600); m = int(up % 3600 / 60)
+    upt = d > 0 ? d "d " hr "h" : hr > 0 ? hr "h " m "m" : m "m"
+
+    L = length("welcome to " name); I = length(ip)
+    il = length(os " . up " upt)
+    w = L + (I > 0 ? I + 2 : 0) + 7; if (il + 7 > w) w = il + 7; if (w < 46) w = 46
+
+    printf "\n  %s╭%s╮%s\n", PINK, rep("─", w), R
+    printf "  %s│%s  %s✦%s  %swelcome to%s %s%s%s%s%s%s%s%s  %s│%s\n", PINK, R, MAUVE, R, GREY, R, B, PINK, name, R, rep(" ", w - L - I - 7), DIM, ip, R, PINK, R
+    printf "  %s│%s     %s%s · up %s%s%s%s│%s\n", PINK, R, DIM, os, upt, R, rep(" ", w - il - 5), PINK, R
+    printf "  %s╰%s╯%s\n", PINK, rep("─", w), R
+
+    lt = l1 >= cpus ? ROSE : l1 >= cpus * 0.7 ? PEACH : MINT
+    load = sprintf("%s%s%s  %s  %s", lt, l1, R, l5, l15)
+    if (docker > 0) load = load "     " GREY "docker" R " " docker " running"
+    row("load", load)
+    usage("memory", mt - ma, mt)
+    split(disk, dk, " "); usage("disk", dk[1], dk[2])
+    if (st > 0) usage("swap", st - sf, st)
+    print ""
+}' /proc/meminfo
+
+exit 0
+EOF
+    chmod +x /etc/update-motd.d/00-vps-welcome
 
     cat > /etc/update-motd.d/90-vps-updates <<'EOF'
 #!/bin/sh
@@ -680,7 +743,7 @@ n=$(cat $c)
 exit 0
 EOF
     chmod +x /etc/update-motd.d/90-vps-updates
-    ok "motd ads and slow sysinfo off; pending updates and reboot notice shown"
+    ok "motd: welcome + live stats, pending updates and reboot notice"
 }
 
 remove_ubuntu_pro() {
