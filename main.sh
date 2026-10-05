@@ -11,6 +11,7 @@ readonly BLOCK_END="# <<< vps-setup <<<"
 readonly OMZ_PLUGINS="git docker docker-compose zsh-autosuggestions zsh-syntax-highlighting"
 readonly AUTH_KEYS="/root/.ssh/authorized_keys"
 readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/00-vps-setup.conf"
+readonly SYSCTL_DROPIN="/etc/sysctl.d/99-vps-setup.conf"
 
 readonly PROTECTED_PKGS="\
 openssh-server openssh-client openssh-sftp-server sudo systemd systemd-sysv systemd-resolved \
@@ -337,6 +338,7 @@ gather_answers() {
     step "the plan"
     printf '\n'
     plan_row true "full system upgrade"
+    plan_row true "kernel tweaks (ping, udp buffers, overcommit)"
     plan_row "$DO_DEBLOAT" "snap, telemetry & pro ads out"
     plan_row true "zsh + oh my zsh + plugins"
     plan_row "$INSTALL_ZOXIDE" "zoxide"
@@ -461,6 +463,25 @@ setup_ssh() {
     step "ssh"
     add_keys
     harden_sshd
+}
+
+tune_sysctl() {
+    step "kernel tweaks"
+    cat > "$SYSCTL_DROPIN" <<'EOF'
+# written by vps-setup — a re-run rewrites this file
+net.ipv4.ping_group_range = 1 65535
+net.core.rmem_max = 8388608
+net.core.wmem_max = 8388608
+vm.overcommit_memory = 1
+EOF
+
+    local failed
+    failed="$(sysctl -p "$SYSCTL_DROPIN" 2>&1 >/dev/null || true)"
+    if [[ -z "$failed" ]]; then
+        ok "unprivileged ping, 8 MB socket buffers, memory overcommit on"
+    else
+        warn "some kernel settings were refused: $(head -n1 <<< "$failed")"
+    fi
 }
 
 install_fail2ban() {
@@ -1115,6 +1136,7 @@ main() {
     set_prompt_name
     setup_ssh
     update_system
+    tune_sysctl
     install_fail2ban
     debloat
     install_omz
