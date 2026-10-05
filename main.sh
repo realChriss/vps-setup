@@ -677,25 +677,28 @@ name=$(sed -n "s/^HOST='\(.*\)'$/\1/p" /root/.zshenv 2>/dev/null | tail -n1)
 [ -n "$name" ] || name=$(hostname)
 . /etc/os-release
 
-read -r l1 l5 l15 _ < /proc/loadavg
+read -r _ u1 n1 s1 i1 w1 q1 sq1 st1 _ < /proc/stat
+sleep 0.2
+read -r _ u2 n2 s2 i2 w2 q2 sq2 st2 _ < /proc/stat
+busy=$(( (u2 + n2 + s2 + q2 + sq2) - (u1 + n1 + s1 + q1 + sq1) ))
+total=$(( busy + (i2 + w2 + st2) - (i1 + w1 + st1) ))
 read -r up _ < /proc/uptime
 up=${up%.*}
 disk=$(df -Pk / | awk 'NR == 2 { print $3, $3 + $4 }')
 ip=$(hostname -I 2>/dev/null | cut -d' ' -f1)
-docker=$(find /sys/fs/cgroup/system.slice -maxdepth 1 -name 'docker-*.scope' 2>/dev/null | wc -l)
 
 awk -v name="$name" -v os="$PRETTY_NAME" \
-    -v l1="$l1" -v l5="$l5" -v l15="$l15" -v cpus="$(getconf _NPROCESSORS_ONLN)" \
-    -v up="$up" -v disk="$disk" -v ip="$ip" -v docker="$docker" '
+    -v busy="$busy" -v total="$total" -v cpus="$(getconf _NPROCESSORS_ONLN)" \
+    -v up="$up" -v disk="$disk" -v ip="$ip" '
 function rep(s, n,   o) { o = ""; while (n-- > 0) o = o s; return o }
 function h(k) { return k >= 1048576 ? sprintf("%.1fG", k / 1048576) : sprintf("%dM", k / 1024) }
 function tone(pct) { return pct >= 85 ? ROSE : pct >= 60 ? PEACH : MINT }
 function row(label, value) { printf "    %s%-7s%s %s\n", GREY, label, R, value }
-function usage(label, used, total,   pct, n) {
-    pct = total > 0 ? used * 100 / total : 0
+function meter(label, pct, detail,   n) {
     n = int(pct * 16 / 100 + 0.5); if (n > 16) n = 16
-    row(label, tone(pct) rep("━", n) R DIM rep("━", 16 - n) R "  " tone(pct) sprintf("%3d%%", pct) R "  " DIM h(used) " / " h(total) R)
+    row(label, tone(pct) rep("━", n) R DIM rep("━", 16 - n) R "  " tone(pct) sprintf("%3d%%", pct) R "  " DIM detail R)
 }
+function usage(label, used, all) { meter(label, all > 0 ? used * 100 / all : 0, h(used) " / " h(all)) }
 /^MemTotal:/     { mt = $2 }
 /^MemAvailable:/ { ma = $2 }
 /^SwapTotal:/    { st = $2 }
@@ -717,10 +720,7 @@ END {
     printf "  %s│%s     %s%s · up %s%s%s%s│%s\n", PINK, R, DIM, os, upt, R, rep(" ", w - il - 5), PINK, R
     printf "  %s╰%s╯%s\n", PINK, rep("─", w), R
 
-    lt = l1 >= cpus ? ROSE : l1 >= cpus * 0.7 ? PEACH : MINT
-    load = sprintf("%s%s%s  %s  %s", lt, l1, R, l5, l15)
-    if (docker > 0) load = load "     " GREY "docker" R " " docker " running"
-    row("load", load)
+    meter("cpu", total > 0 ? busy * 100 / total : 0, cpus " cores")
     usage("memory", mt - ma, mt)
     split(disk, dk, " "); usage("disk", dk[1], dk[2])
     if (st > 0) usage("swap", st - sf, st)
