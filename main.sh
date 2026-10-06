@@ -25,6 +25,7 @@ DO_DEBLOAT=true
 PROMPT_NAME=""
 NEW_KEYS=()
 SSH_KEYS_ONLY=false
+TZ_NEW=""
 
 WARNINGS=()
 LOG=""
@@ -310,6 +311,8 @@ gather_answers() {
         fi
     done
 
+    ask_timezone
+
     if [[ "$IS_UBUNTU" == true ]]; then
         confirm "kill snap, telemetry and pro ads?" y && DO_DEBLOAT=true || DO_DEBLOAT=false
     else
@@ -355,6 +358,7 @@ gather_answers() {
     plan_row "$([[ ${#NEW_KEYS[@]} -gt 0 ]] && echo true || echo false)" "add ${#NEW_KEYS[@]} ssh key(s) for root"
     plan_row "$SSH_KEYS_ONLY" "ssh keys only, password login off"
     plan_row true "server name $C_B$PROMPT_NAME$C_RESET (prompt + login screen)"
+    plan_row "$([[ -n "$TZ_NEW" ]] && echo true || echo false)" "timezone ${TZ_NEW:-unchanged}"
     printf '\n'
 
     confirm "let's go?" y || { printf '\n    %suntouched. bye ♡%s\n\n' "$C_DIM" "$C_RESET"; exit 0; }
@@ -382,6 +386,112 @@ set_prompt_name() {
         printf "HOST='%s'\n" "$PROMPT_NAME" >> "$ZSHENV"
     fi
     ok "server name $C_B$PROMPT_NAME$C_RESET in the prompt and login screen"
+}
+
+valid_tz() {
+    local tz="$1"
+    [[ -n "$tz" && ${#tz} -le 64 ]] || return 1
+    [[ "$tz" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] || return 1
+    if [[ -d /usr/share/zoneinfo ]]; then
+        [[ -f "/usr/share/zoneinfo/$tz" ]] || return 1
+    fi
+    return 0
+}
+
+fetch() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --max-time 4 "$1" 2>/dev/null
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- -T 4 "$1" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+ssh_client_ip() {
+    local v="${SSH_CONNECTION:-${SSH_CLIENT:-}}" pid=$$ ppid i
+    if [[ -z "$v" ]]; then
+        for i in $(seq 1 30); do
+            v="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | sed -n 's/^SSH_CONNECTION=//p' | head -n1 || true)"
+            [[ -z "$v" ]] || break
+            ppid="$(awk '/^PPid:/ {print $2}' "/proc/$pid/status" 2>/dev/null || true)"
+            [[ -n "$ppid" && "$ppid" -gt 1 ]] || break
+            pid="$ppid"
+        done
+    fi
+    if [[ -z "$v" ]]; then
+        v="$(who -m 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n1 || true)"
+    fi
+    v="${v%% *}"
+    v="${v#::ffff:}"
+    v="${v%%\%*}"
+    [[ "$v" =~ ^[0-9.]+$ || "$v" =~ ^[0-9A-Fa-f:]+$ ]] || return 0
+    printf '%s' "$v"
+}
+
+is_public_ip() {
+    local ip="${1,,}"
+    [[ -n "$ip" ]] || return 1
+    case "$ip" in
+        10.*|127.*|0.*|169.254.*|192.168.*) return 1 ;;
+        172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 1 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 1 ;;
+        ::1|fe80:*|fc*|fd*) return 1 ;;
+    esac
+    return 0
+}
+
+geo_tz() {
+    local ip="$1" url tz
+    for url in \
+        "https://ipinfo.io/${ip:+$ip/}timezone" \
+        "https://ipapi.co/${ip:+$ip/}timezone/" \
+        "http://ip-api.com/line/${ip}?fields=timezone"; do
+        tz="$(fetch "$url" | head -n1 | tr -d '[:space:]' || true)"
+        if valid_tz "$tz"; then printf '%s' "$tz"; return 0; fi
+    done
+    return 0
+}
+
+guess_tz() {
+    local ip tz=""
+    ip="$(ssh_client_ip)"
+    if is_public_ip "$ip"; then tz="$(geo_tz "$ip")"; fi
+    [[ -n "$tz" ]] || tz="$(geo_tz "")"
+    printf '%s' "$tz"
+}
+
+ask_timezone() {
+    local guess
+    spin_start "finding your timezone"
+    guess="$(guess_tz)"
+    spin_stop
+    [[ -n "$guess" ]] || return 0
+    if confirm "set timezone to $C_B$guess$C_RESET?" y; then TZ_NEW="$guess"; fi
+}
+
+set_timezone() {
+    step "timezone"
+    if [[ -z "$TZ_NEW" ]]; then
+        skip "skipped"; return 0
+    fi
+
+    if ! pkg_installed tzdata; then
+        run "tzdata" apt_get install tzdata || { warn "tzdata missing, timezone unchanged"; return 0; }
+    fi
+    if [[ ! -f "/usr/share/zoneinfo/$TZ_NEW" ]]; then
+        warn "no zoneinfo for $TZ_NEW, timezone unchanged"; return 0
+    fi
+
+    if ! { have_systemd && timedatectl set-timezone "$TZ_NEW" >/dev/null 2>&1; }; then
+        ln -sf "/usr/share/zoneinfo/$TZ_NEW" /etc/localtime \
+            || { warn "could not set the timezone — run: timedatectl set-timezone $TZ_NEW"; return 0; }
+    fi
+    printf '%s\n' "$TZ_NEW" > /etc/timezone
+
+    sysd try-restart cron.service
+    sysd try-restart rsyslog.service
+    ok "$TZ_NEW, clock reads $(date '+%H:%M %Z')"
 }
 
 key_count() {
@@ -435,7 +545,6 @@ harden_sshd() {
     mkdir -p /etc/ssh/sshd_config.d /run/sshd
 
     {
-        printf '# written by vps-setup — a re-run rewrites this file\n'
         printf 'X11Forwarding no\nLoginGraceTime 30\n'
         if [[ "$SSH_KEYS_ONLY" == true ]]; then
             printf 'PubkeyAuthentication yes\nPasswordAuthentication no\n'
@@ -472,7 +581,6 @@ setup_ssh() {
 tune_sysctl() {
     step "kernel tweaks"
     cat > "$SYSCTL_DROPIN" <<'EOF'
-# written by vps-setup — a re-run rewrites this file
 net.ipv4.ping_group_range = 1 65535
 net.core.rmem_max = 8388608
 net.core.wmem_max = 8388608
@@ -524,7 +632,6 @@ tune_journald() {
     step "journal"
     mkdir -p "${JOURNALD_DROPIN%/*}"
     cat > "$JOURNALD_DROPIN" <<'EOF'
-# written by vps-setup — a re-run rewrites this file
 [Journal]
 SystemMaxUse=200M
 EOF
@@ -542,7 +649,6 @@ install_fail2ban() {
         || { warn "fail2ban could not be installed"; return 0; }
 
     cat > /etc/fail2ban/jail.d/vps-setup.local <<'EOF'
-# written by vps-setup
 [DEFAULT]
 bantime = 1h
 bantime.increment = true
@@ -1070,7 +1176,6 @@ write_zshrc_block() {
 ${BLOCK_START}
 export PATH="\$HOME/.local/bin:\$PATH"
 
-# bun
 export BUN_INSTALL="\$HOME/.bun"
 [ -d "\$BUN_INSTALL/bin" ] && export PATH="\$BUN_INSTALL/bin:\$PATH"
 [ -s "\$BUN_INSTALL/_bun" ] && source "\$BUN_INSTALL/_bun"
@@ -1079,7 +1184,6 @@ EOF
     if [[ "$INSTALL_ZOXIDE" == true ]]; then
         cat >> "$ZSHRC" <<EOF
 
-# zoxide — 'z <dir>' to jump around, 'zi' for the interactive picker
 command -v zoxide >/dev/null 2>&1 && eval "\$(zoxide init zsh)"
 EOF
     fi
@@ -1090,8 +1194,6 @@ EOF
         local eza_tree="${eza_short} --tree --ignore-glob=.git"
         cat >> "$ZSHRC" <<EOF
 
-# eza — drop-in ls, always showing hidden files (.env, .github, .gitignore…)
-# real ls and tree are still there as 'command ls', '\\ls', /bin/ls, 'command tree'
 if command -v eza >/dev/null 2>&1; then
     alias ls='eza ${eza_short}'
     alias l='eza ${eza_long}'
@@ -1107,7 +1209,6 @@ EOF
     if [[ "$INSTALL_DTOP" == true ]]; then
         cat >> "$ZSHRC" <<'EOF'
 
-# dtop — the docker plugin aliases dtop to 'docker top', we want the real thing
 unalias dtop 2>/dev/null || true
 EOF
     fi
@@ -1240,6 +1341,7 @@ main() {
     set_prompt_name
     setup_ssh
     update_system
+    set_timezone
     tune_sysctl
     setup_swap
     tune_journald
