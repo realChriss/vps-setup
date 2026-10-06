@@ -331,7 +331,6 @@ gather_answers() {
     confirm "btop?" y && INSTALL_BTOP=true || INSTALL_BTOP=false
     confirm "dtop?" y && INSTALL_DTOP=true || INSTALL_DTOP=false
     confirm "fail2ban for ssh?" y && INSTALL_F2B=true || INSTALL_F2B=false
-    ask_bootcall
 
     local have
     have="$(key_count)"
@@ -345,6 +344,8 @@ gather_answers() {
         SSH_KEYS_ONLY=false
         printf '      %sno keys, so ssh password login stays on%s\n' "$C_DIM" "$C_RESET" >&2
     fi
+
+    ask_bootcall
 
     step "the plan"
     printf '\n'
