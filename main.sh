@@ -14,6 +14,8 @@ readonly SSHD_DROPIN="/etc/ssh/sshd_config.d/00-vps-setup.conf"
 readonly SYSCTL_DROPIN="/etc/sysctl.d/99-vps-setup.conf"
 readonly JOURNALD_DROPIN="/etc/systemd/journald.conf.d/00-vps-setup.conf"
 readonly SWAPFILE="/swapfile"
+readonly BOOTCALL_INSTALLER="https://raw.githubusercontent.com/realChriss/bootcall/main/install.sh"
+readonly BOOTCALL_CONF="/etc/bootcall.conf"
 
 readonly PROTECTED_PKGS="\
 openssh-server openssh-client openssh-sftp-server sudo systemd systemd-sysv systemd-resolved \
@@ -26,6 +28,9 @@ PROMPT_NAME=""
 NEW_KEYS=()
 SSH_KEYS_ONLY=false
 TZ_NEW=""
+INSTALL_BOOTCALL=false
+BOOTCALL_TOKEN=""
+BOOTCALL_CHAT_ID=""
 
 WARNINGS=()
 LOG=""
@@ -326,6 +331,7 @@ gather_answers() {
     confirm "btop?" y && INSTALL_BTOP=true || INSTALL_BTOP=false
     confirm "dtop?" y && INSTALL_DTOP=true || INSTALL_DTOP=false
     confirm "fail2ban for ssh?" y && INSTALL_F2B=true || INSTALL_F2B=false
+    ask_bootcall
 
     local have
     have="$(key_count)"
@@ -355,6 +361,7 @@ gather_answers() {
     plan_row "$INSTALL_BTOP" "btop"
     plan_row "$INSTALL_DTOP" "dtop"
     plan_row "$INSTALL_F2B" "fail2ban guarding ssh"
+    plan_row "$INSTALL_BOOTCALL" "bootcall telegram ping on boot${BOOTCALL_CHAT_ID:+ (chat $BOOTCALL_CHAT_ID)}"
     plan_row "$([[ ${#NEW_KEYS[@]} -gt 0 ]] && echo true || echo false)" "add ${#NEW_KEYS[@]} ssh key(s) for root"
     plan_row "$SSH_KEYS_ONLY" "ssh keys only, password login off"
     plan_row true "server name $C_B$PROMPT_NAME$C_RESET (prompt + login screen)"
@@ -672,6 +679,74 @@ EOF
     else
         warn "fail2ban is not watching ssh — check: systemctl status fail2ban"
     fi
+}
+
+valid_bot_token() { [[ "$1" =~ ^[0-9]{5,}:[A-Za-z0-9_-]{20,}$ ]]; }
+valid_chat_id()   { [[ "$1" =~ ^-?[0-9]{1,20}$ || "$1" =~ ^@[A-Za-z0-9_]{5,32}$ ]]; }
+
+ask_bootcall() {
+    local label="bootcall?" default=y t c
+    if [[ -f "$BOOTCALL_CONF" ]]; then
+        label="bootcall is already set up — reinstall with a new token and chat id?"
+        default=n
+    fi
+    confirm "$label" "$default" || return 0
+
+    while true; do
+        t="$(ask "$(printf '      %s%s%s bot token ' "$C_PINK" "$S_TIP" "$C_RESET")" "")"
+        t="${t//[[:space:]]/}"
+        if [[ -z "$t" ]]; then
+            printf '      %sno token, bootcall skipped%s\n' "$C_DIM" "$C_RESET" >&2; return 0
+        fi
+        valid_bot_token "$t" && break
+        printf '        %snot a bot token — want: 123456789:AAH…%s\n' "$C_DIM" "$C_RESET" >&2
+    done
+
+    while true; do
+        c="$(ask "$(printf '      %s%s%s chat id ' "$C_PINK" "$S_TIP" "$C_RESET")" "")"
+        c="${c//[[:space:]]/}"
+        if [[ -z "$c" ]]; then
+            printf '      %sno chat id, bootcall skipped%s\n' "$C_DIM" "$C_RESET" >&2; return 0
+        fi
+        valid_chat_id "$c" && break
+        printf '        %snot a chat id — want a number like 123456789 (or -100… for groups)%s\n' "$C_DIM" "$C_RESET" >&2
+    done
+
+    BOOTCALL_TOKEN="$t"
+    BOOTCALL_CHAT_ID="$c"
+    INSTALL_BOOTCALL=true
+}
+
+bootcall_install() {
+    local tmp rc=0
+    tmp="$(mktemp)"
+    curl -fsSL "$BOOTCALL_INSTALLER" -o "$tmp" || { rm -f "$tmp"; return 1; }
+    bash "$tmp" --token "$BOOTCALL_TOKEN" --chat-id "$BOOTCALL_CHAT_ID" || rc=$?
+    rm -f "$tmp"
+    return "$rc"
+}
+
+install_bootcall() {
+    if [[ "$INSTALL_BOOTCALL" != true ]]; then
+        step "bootcall"; skip "skipped"; return 0
+    fi
+    step "bootcall"
+
+    if ! have_systemd; then
+        warn "bootcall needs systemd, which is not running here — skipped"; return 0
+    fi
+
+    if run "bootcall (args installer)" bootcall_install; then
+        ok "bootcall $(tr -d '[:space:]' < /opt/bootcall/VERSION 2>/dev/null || true) pings chat $BOOTCALL_CHAT_ID on every boot"
+        if run "sending a test message" systemctl start bootcall.service; then
+            note "check telegram — if nothing arrived, send /start to your bot and run: systemctl start bootcall"
+        else
+            warn "bootcall test message failed — check token and chat id in $BOOTCALL_CONF"
+        fi
+    else
+        warn "bootcall could not be installed — retry later from https://github.com/realChriss/bootcall"
+    fi
+    BOOTCALL_TOKEN=""
 }
 
 update_system() {
@@ -1277,7 +1352,7 @@ row() {
 }
 
 summary() {
-    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v f2b_v shell_now
+    local zsh_v zoxide_v eza_v docker_v bun_v btop_v dtop_v f2b_v bootcall_v shell_now
     shell_now="$(getent passwd root 2>/dev/null | cut -d: -f7 || true)"
     zsh_v="$(zsh --version 2>/dev/null | awk '{print $2}' || true)"
     zoxide_v="$(zoxide --version 2>/dev/null || /root/.local/bin/zoxide --version 2>/dev/null || true)"
@@ -1289,6 +1364,7 @@ summary() {
     [[ -n "$btop_v" ]] || btop_v="$(btop_version /usr/local/bin/btop)"
     f2b_v="$(fail2ban-client version 2>/dev/null | head -n1 || true)"
     dtop_v="$({ dtop --version 2>/dev/null || /root/.local/bin/dtop --version 2>/dev/null; } | awk 'NR==1 {print $NF; exit}' | strip_ansi || true)"
+    bootcall_v="$(tr -d '[:space:]' < /opt/bootcall/VERSION 2>/dev/null || true)"
 
     printf '\n  %s%s%s\n' "$C_MINT" "$RULE" "$C_RESET"
     printf '  %s%s  all done%s\n' "$C_MINT" "$S_STAR" "$C_RESET"
@@ -1304,6 +1380,7 @@ summary() {
     row "btop" "${btop_v:-—}"
     row "dtop" "${dtop_v:-—}"
     row "fail2ban" "${f2b_v:-—}"
+    row "bootcall" "${bootcall_v:-—}"
     if [[ "$SSH_KEYS_ONLY" == true ]]; then
         row "ssh" "keys only, $(key_count) authorized"
     else
@@ -1346,6 +1423,7 @@ main() {
     setup_swap
     tune_journald
     install_fail2ban
+    install_bootcall
     debloat
     install_omz
     install_zoxide
